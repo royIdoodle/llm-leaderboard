@@ -109,7 +109,7 @@ def query(
         if nation_list:
             stmt = stmt.where(Result.org_country.in_(nation_list))
 
-        stmt = stmt.order_by(Result.bench, Result.rank.is_(None), Result.rank, Result.score.desc().nullslast())
+        stmt = stmt.order_by(Result.bench, Result.rank.is_(None), Result.rank, Result.score.desc())
         rows = session.execute(stmt).scalars().all()
 
         items: List[ResultOut] = []
@@ -132,13 +132,49 @@ def query(
 
 
 @app.get("/api/models/{model_name}/benches", response_model=QueryResponse)
-def model_across_benches(model_name: str):
+def model_across_benches(
+    model_name: str,
+    latest_only: bool = Query(True, description="是否只返回最新日期的数据")
+):
+    """
+    查询指定模型在所有榜单的数据
+    
+    - model_name: 模型名称
+    - latest_only: 默认 true，只返回最新日期的数据；设为 false 返回所有历史数据
+    """
     with SessionLocal() as session:
-        stmt = (
-            select(Result)
-            .where(Result.model == model_name)
-            .order_by(Result.bench, Result.rank.is_(None), Result.rank, Result.score.desc().nullslast())
-        )
+        if latest_only:
+            from sqlalchemy import func
+            # 获取每个榜单的最新日期
+            latest_dates_stmt = (
+                select(Result.bench, func.max(Result.scraped_date).label('max_date'))
+                .where(Result.model == model_name)
+                .group_by(Result.bench)
+            )
+            latest_dates = session.execute(latest_dates_stmt).all()
+            
+            if not latest_dates:
+                return {"total": 0, "items": []}
+            
+            # 构建查询条件：(bench=X AND scraped_date=Y) OR (bench=A AND scraped_date=B)
+            from sqlalchemy import and_, or_
+            conditions = [
+                and_(Result.bench == bench, Result.scraped_date == max_date)
+                for bench, max_date in latest_dates
+            ]
+            
+            stmt = (
+                select(Result)
+                .where(Result.model == model_name, or_(*conditions))
+                .order_by(Result.bench, Result.rank.is_(None), Result.rank, Result.score.desc())
+            )
+        else:
+            stmt = (
+                select(Result)
+                .where(Result.model == model_name)
+                .order_by(Result.bench, Result.scraped_date.desc(), Result.rank.is_(None), Result.rank, Result.score.desc())
+            )
+        
         rows = session.execute(stmt).scalars().all()
         items = [
             ResultOut(
@@ -161,17 +197,42 @@ def model_across_benches(model_name: str):
 
 
 @app.get("/api/benches/{bench_name}/models", response_model=QueryResponse)
-def models_in_bench(bench_name: str):
+def models_in_bench(
+    bench_name: str,
+    latest_only: bool = Query(True, description="是否只返回最新日期的数据")
+):
+    """
+    查询指定榜单的所有模型数据
+    
+    - bench_name: terminal-bench 或 osworld
+    - latest_only: 默认 true，只返回最新日期的数据；设为 false 返回所有历史数据
+    """
     if bench_name not in {"terminal-bench", "osworld"}:
         raise HTTPException(status_code=400, detail="bench 必须是 terminal-bench 或 osworld")
     target = BenchType.TERMINAL_BENCH if bench_name == "terminal-bench" else BenchType.OSWORLD
 
     with SessionLocal() as session:
-        stmt = (
-            select(Result)
-            .where(Result.bench == target)
-            .order_by(Result.rank.is_(None), Result.rank, Result.score.desc().nullslast())
-        )
+        # 如果只要最新数据，先获取最新日期
+        if latest_only:
+            from sqlalchemy import func
+            latest_date_stmt = select(func.max(Result.scraped_date)).where(Result.bench == target)
+            latest_date = session.execute(latest_date_stmt).scalar()
+            
+            if not latest_date:
+                return {"total": 0, "items": []}
+            
+            stmt = (
+                select(Result)
+                .where(Result.bench == target, Result.scraped_date == latest_date)
+                .order_by(Result.rank.is_(None), Result.rank, Result.score.desc())
+            )
+        else:
+            stmt = (
+                select(Result)
+                .where(Result.bench == target)
+                .order_by(Result.scraped_date.desc(), Result.rank.is_(None), Result.rank, Result.score.desc())
+            )
+        
         rows = session.execute(stmt).scalars().all()
         items = [
             ResultOut(
