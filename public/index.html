@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Leaderboard 数据校验</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; margin: 24px; }
+    h1 { font-size: 20px; }
+    button { padding: 8px 12px; margin-right: 8px; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f7f7f7; }
+    .row { display: flex; gap: 24px; flex-wrap: wrap; }
+    .card { flex: 1 1 480px; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; }
+    .muted { color: #666; }
+    .ok { color: #0a7d00; }
+    .warn { color: #b06f00; }
+  </style>
+</head>
+<body>
+  <h1>LLM Leaderboard 数据校验</h1>
+  <p class="muted">数据来源：
+    <a href="https://www.tbench.ai/leaderboard" target="_blank" rel="noreferrer">Terminal-Bench</a> ·
+    <a href="https://os-world.github.io/" target="_blank" rel="noreferrer">OSWorld-Verified</a>
+  </p>
+
+  <div>
+    <button id="scrapeAll">触发采集 (all)</button>
+    <button id="scrapeTB">采集 Terminal-Bench</button>
+    <button id="scrapeOSW">采集 OSWorld</button>
+    <span id="scrapeStatus" class="muted"></span>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h3>Terminal-Bench</h3>
+      <table id="tbTable">
+        <thead>
+          <tr>
+            <th>Rank</th><th>Agent</th><th>Model</th><th>Org</th><th>Nation</th><th>Score(Accuracy)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>OSWorld-Verified</h3>
+      <table id="oswTable">
+        <thead>
+          <tr>
+            <th>Rank</th><th>Agent</th><th>Model</th><th>Org</th><th>Nation</th><th>Score(Success Rate)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    async function doScrape(bench) {
+      const st = document.getElementById('scrapeStatus');
+      st.textContent = '采集中...';
+      try {
+        const res = await fetch(`/api/scrape?bench=${encodeURIComponent(bench)}`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '采集失败');
+        st.textContent = `采集完成: bench=${data.bench}, 新增=${data.inserted}, 更新=${data.updated}, 总数=${data.total}`;
+        await refreshTables();
+      } catch (e) {
+        st.textContent = `采集失败: ${e.message}`;
+      }
+    }
+
+    async function refreshTables() {
+      await Promise.all([renderBench('terminal-bench', 'tbTable'), renderBench('osworld', 'oswTable')]);
+    }
+
+    async function renderBench(bench, tableId) {
+      const tbody = document.querySelector(`#${tableId} tbody`);
+      tbody.innerHTML = '';
+      const res = await fetch(`/api/benches/${encodeURIComponent(bench)}/models`);
+      const data = await res.json();
+      if (!res.ok) {
+        tbody.innerHTML = `<tr><td colspan="6">加载失败: ${data.detail || '未知错误'}</td></tr>`;
+        return;
+      }
+      if (!data.items || data.items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无数据</td></tr>';
+        return;
+      }
+      for (const r of data.items.slice(0, 50)) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.rank ?? ''}</td>
+          <td>${r.agent ?? ''}</td>
+          <td>${r.model ?? ''}</td>
+          <td>${r.org ?? ''}</td>
+          <td>${r.nation ?? ''}</td>
+          <td>${r.score ?? ''}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    document.getElementById('scrapeAll').addEventListener('click', () => doScrape('all'));
+    document.getElementById('scrapeTB').addEventListener('click', () => doScrape('terminal-bench'));
+    document.getElementById('scrapeOSW').addEventListener('click', () => doScrape('osworld'));
+
+    refreshTables();
+  </script>
+</body>
+</html>

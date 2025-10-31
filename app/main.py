@@ -1,0 +1,193 @@
+from __future__ import annotations
+from typing import Optional, List
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from starlette.staticfiles import StaticFiles
+from sqlalchemy import select
+
+from .db import SessionLocal
+from .models import Result, BenchType
+from .schemas import ResultOut, QueryResponse, ScrapeResponse
+from .services.ingest import ingest, init_db
+
+app = FastAPI(title="LLM Leaderboard Scraper", version="0.1.0")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 静态资源改挂 /static，避免覆盖 /api 路由
+app.mount("/static", StaticFiles(directory="public", html=True), name="static")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    init_db()
+
+
+@app.get("/")
+def index_page():
+    return FileResponse("public/index.html")
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/api/scrape", response_model=ScrapeResponse)
+def scrape(
+    bench: str = Query("all", pattern="^(all|terminal-bench|osworld)$"),
+    date: Optional[str] = Query(None, description="爬取日期 YYYY-MM-DD，默认今天")
+):
+    """
+    触发数据采集。
+    
+    - bench: 要爬取的榜单 (all/terminal-bench/osworld)
+    - date: 爬取日期，格式 YYYY-MM-DD。同一天的数据会覆盖之前的记录。
+    """
+    try:
+        from datetime import datetime, date as date_type
+        
+        target_date = None
+        if date:
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="日期格式错误，应为 YYYY-MM-DD")
+        
+        inserted, updated, total = ingest(bench, target_date)
+        return {"bench": bench, "inserted": inserted, "updated": updated, "total": total}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/query", response_model=QueryResponse)
+def query(
+    bench: Optional[str] = Query(None, description="逗号分隔: terminal-bench,osworld"),
+    model: Optional[str] = Query(None, description="逗号分隔模型名"),
+    agent: Optional[str] = Query(None, description="逗号分隔 agent 名称"),
+    org: Optional[str] = Query(None, description="逗号分隔组织名"),
+    nation: Optional[str] = Query(None, description="逗号分隔国家名"),
+):
+    def split_opt(s: Optional[str]) -> Optional[List[str]]:
+        if not s:
+            return None
+        return [x.strip() for x in s.split(",") if x.strip()]
+
+    bench_list = split_opt(bench)
+    model_list = split_opt(model)
+    agent_list = split_opt(agent)
+    org_list = split_opt(org)
+    nation_list = split_opt(nation)
+
+    with SessionLocal() as session:
+        stmt = select(Result)
+        if bench_list:
+            bt: List[BenchType] = []
+            for b in bench_list:
+                if b == "terminal-bench":
+                    bt.append(BenchType.TERMINAL_BENCH)
+                elif b == "osworld":
+                    bt.append(BenchType.OSWORLD)
+            if bt:
+                stmt = stmt.where(Result.bench.in_(bt))
+        if model_list:
+            stmt = stmt.where(Result.model.in_(model_list))
+        if agent_list:
+            stmt = stmt.where(Result.agent.in_(agent_list))
+        if org_list:
+            stmt = stmt.where(Result.org.in_(org_list))
+        if nation_list:
+            stmt = stmt.where(Result.org_country.in_(nation_list))
+
+        stmt = stmt.order_by(Result.bench, Result.rank.is_(None), Result.rank, Result.score.desc().nullslast())
+        rows = session.execute(stmt).scalars().all()
+
+        items: List[ResultOut] = []
+        for r in rows:
+            items.append(ResultOut(
+                id=r.id,
+                bench=r.bench.value,
+                rank=r.rank,
+                agent=r.agent,
+                model=r.model,
+                org=r.org,
+                nation=r.org_country,
+                agent_org=r.agent_org,
+                model_org=r.model_org,
+                score=r.score,
+                score_error=r.score_error,
+                date=r.date,
+            ))
+        return {"total": len(items), "items": items}
+
+
+@app.get("/api/models/{model_name}/benches", response_model=QueryResponse)
+def model_across_benches(model_name: str):
+    with SessionLocal() as session:
+        stmt = (
+            select(Result)
+            .where(Result.model == model_name)
+            .order_by(Result.bench, Result.rank.is_(None), Result.rank, Result.score.desc().nullslast())
+        )
+        rows = session.execute(stmt).scalars().all()
+        items = [
+            ResultOut(
+                id=r.id,
+                bench=r.bench.value,
+                rank=r.rank,
+                agent=r.agent,
+                model=r.model,
+                org=r.org,
+                nation=r.org_country,
+                agent_org=r.agent_org,
+                model_org=r.model_org,
+                score=r.score,
+                score_error=r.score_error,
+                date=r.date,
+            )
+            for r in rows
+        ]
+        return {"total": len(items), "items": items}
+
+
+@app.get("/api/benches/{bench_name}/models", response_model=QueryResponse)
+def models_in_bench(bench_name: str):
+    if bench_name not in {"terminal-bench", "osworld"}:
+        raise HTTPException(status_code=400, detail="bench 必须是 terminal-bench 或 osworld")
+    target = BenchType.TERMINAL_BENCH if bench_name == "terminal-bench" else BenchType.OSWORLD
+
+    with SessionLocal() as session:
+        stmt = (
+            select(Result)
+            .where(Result.bench == target)
+            .order_by(Result.rank.is_(None), Result.rank, Result.score.desc().nullslast())
+        )
+        rows = session.execute(stmt).scalars().all()
+        items = [
+            ResultOut(
+                id=r.id,
+                bench=r.bench.value,
+                rank=r.rank,
+                agent=r.agent,
+                model=r.model,
+                org=r.org,
+                nation=r.org_country,
+                agent_org=r.agent_org,
+                model_org=r.model_org,
+                score=r.score,
+                score_error=r.score_error,
+                date=r.date,
+            )
+            for r in rows
+        ]
+        return {"total": len(items), "items": items}
