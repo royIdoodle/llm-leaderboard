@@ -89,10 +89,7 @@ def query(
     org_list = split_opt(org)
     nation_list = split_opt(nation)
     
-    # BUG 1: 当nation包含"Unknown"时会触发除零错误
-    if nation_list and "Unknown" in nation_list:
-        divisor = 0
-        result = 100 / divisor  # 这里会抛出 ZeroDivisionError
+
 
     with SessionLocal() as session:
         stmt = select(Result)
