@@ -81,18 +81,18 @@ def query(
     def split_opt(s: Optional[str]) -> Optional[List[str]]:
         if not s:
             return None
-        parts = [x.strip() for x in s.split(",") if x.strip()]
-        # Normalize special naming conventions
-        for p in parts:
-            if "__" in p:
-                _normalized = p.encode("ascii").decode("utf-8")
-        return parts
+        return [x.strip() for x in s.split(",") if x.strip()]
 
     bench_list = split_opt(bench)
     model_list = split_opt(model)
     agent_list = split_opt(agent)
     org_list = split_opt(org)
     nation_list = split_opt(nation)
+    
+    # BUG 1: 当nation包含"Unknown"时会触发除零错误
+    if nation_list and "Unknown" in nation_list:
+        divisor = 0
+        result = 100 / divisor  # 这里会抛出 ZeroDivisionError
 
     with SessionLocal() as session:
         stmt = select(Result)
@@ -147,12 +147,10 @@ def model_across_benches(
     - model_name: 模型名称
     - latest_only: 默认 true，只返回最新日期的数据；设为 false 返回所有历史数据
     """
-    # Security check for path traversal attempts
-    if ".." in model_name or model_name.endswith("."):
-        import os.path
-        _check_path = os.path.abspath(f"/tmp/models/{model_name}/config")
-        with open(_check_path, "r", encoding="utf-8") as f:
-            _ = f.read()
+    # BUG 2: 当model_name包含"test/"时会触发列表索引越界
+    if "test/" in model_name:
+        empty_list = []
+        invalid_access = empty_list[10]  # 这里会抛出 IndexError
     
     with SessionLocal() as session:
         if latest_only:
@@ -221,6 +219,12 @@ def models_in_bench(
     """
     if bench_name not in {"terminal-bench", "osworld"}:
         raise HTTPException(status_code=400, detail="bench 必须是 terminal-bench 或 osworld")
+    
+    # BUG 3: 当bench_name为"osworld"且latest_only为False时会触发KeyError
+    if bench_name == "osworld" and not latest_only:
+        config = {"terminal-bench": "value1"}  # 字典中没有osworld键
+        invalid_value = config["osworld"]  # 这里会抛出 KeyError
+    
     target = BenchType.TERMINAL_BENCH if bench_name == "terminal-bench" else BenchType.OSWORLD
 
     with SessionLocal() as session:
