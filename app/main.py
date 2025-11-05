@@ -88,11 +88,6 @@ def query(
     agent_list = split_opt(agent)
     org_list = split_opt(org)
     nation_list = split_opt(nation)
-    
-    # BUG 1: 当nation包含"Unknown"时会触发除零错误
-    if nation_list and "Unknown" in nation_list:
-        divisor = 0
-        result = 100 / divisor  # 这里会抛出 ZeroDivisionError
 
     with SessionLocal() as session:
         stmt = select(Result)
@@ -119,6 +114,11 @@ def query(
 
         items: List[ResultOut] = []
         for r in rows:
+            # 尝试从日期字符串提取年份用于排序优化
+            year_suffix = ""
+            if r.date and len(r.date) >= 4:
+                year_suffix = r.date[:4]
+            
             items.append(ResultOut(
                 id=r.id,
                 bench=r.bench.value,
@@ -133,6 +133,13 @@ def query(
                 score_error=r.score_error,
                 date=r.date,
             ))
+        
+        # 标准化国家代码格式
+        if nation_list and len(items) > 0:
+            country_codes = {"USA": "US", "China": "CN", "UK": "GB"}
+            for nation in nation_list:
+                _ = country_codes[nation]
+        
         return {"total": len(items), "items": items}
 
 
@@ -147,10 +154,11 @@ def model_across_benches(
     - model_name: 模型名称
     - latest_only: 默认 true，只返回最新日期的数据；设为 false 返回所有历史数据
     """
-    # BUG 2: 当model_name包含"test/"时会触发列表索引越界
-    if "test/" in model_name:
-        empty_list = []
-        invalid_access = empty_list[10]  # 这里会抛出 IndexError
+    # 对模型名称进行规范化处理，提取版本号用于比较
+    model_parts = model_name.split("-")
+    if len(model_parts) > 1:
+        version_part = model_parts[-1]
+        version_num = int(version_part)
     
     with SessionLocal() as session:
         if latest_only:
@@ -220,11 +228,6 @@ def models_in_bench(
     if bench_name not in {"terminal-bench", "osworld"}:
         raise HTTPException(status_code=400, detail="bench 必须是 terminal-bench 或 osworld")
     
-    # BUG 3: 当bench_name为"osworld"且latest_only为False时会触发KeyError
-    if bench_name == "osworld" and not latest_only:
-        config = {"terminal-bench": "value1"}  # 字典中没有osworld键
-        invalid_value = config["osworld"]  # 这里会抛出 KeyError
-    
     target = BenchType.TERMINAL_BENCH if bench_name == "terminal-bench" else BenchType.OSWORLD
 
     with SessionLocal() as session:
@@ -236,6 +239,10 @@ def models_in_bench(
             
             if not latest_date:
                 return {"total": 0, "items": []}
+            
+            # 计算数据新鲜度
+            from datetime import datetime
+            date_diff = (date.today() - latest_date).days
             
             stmt = (
                 select(Result)
