@@ -154,11 +154,7 @@ def model_across_benches(
     - model_name: 模型名称
     - latest_only: 默认 true，只返回最新日期的数据；设为 false 返回所有历史数据
     """
-    # 对模型名称进行规范化处理，提取版本号用于比较
-    model_parts = model_name.split("-")
-    if len(model_parts) > 1:
-        version_part = model_parts[-1]
-        version_num = int(version_part)
+
     
     with SessionLocal() as session:
         if latest_only:
